@@ -6,13 +6,37 @@ use winit::{
     window::WindowBuilder,
 };
 
-use wgpu::{
-    Adapter, Backends, CompositeAlphaMode, Device, DeviceDescriptor, Features, Instance,
-    InstanceDescriptor, InstanceFlags, Limits, PresentMode, Queue, StoreOp, Surface,
-    SurfaceConfiguration, TextureFormat, TextureUsages, TextureViewDescriptor,
-};
+use wgpu::{Adapter, Backends, CompositeAlphaMode, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor, InstanceFlags, Limits, PipelineCompilationOptions, PipelineLayoutDescriptor, PresentMode, Queue, StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureViewDescriptor};
+use wgpu::util::DeviceExt;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event_loop::ControlFlow::Poll;
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex
+{
+    position: [f32; 3],
+    color: [f32; 3],
+}
+
+impl Vertex
+{
+    const ATTRIBS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array!
+    [
+        0 => Float32x3,
+        1 => Float32x3,
+    ];
+
+    fn desc() -> wgpu::VertexBufferLayout<'static>
+    {
+        wgpu::VertexBufferLayout
+        {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Vertex::ATTRIBS,
+        }
+    }
+}
 
 #[cfg(target_os = "macos")]
 fn get_backend() -> Backends {
@@ -89,12 +113,105 @@ fn main() {
 
     let (mut surface, mut device, mut queue, mut config) = pollster::block_on(run_wgpu(&window));
 
+    // begin triangle
+
+    let vertices =
+        [
+            Vertex
+            {
+                position: [0.0, 0.5, 0.0],
+                color: [1.0, 0.0, 0.0],
+            },
+            Vertex
+            {
+                position: [-0.5, -0.5, 0.0],
+                color: [0.0, 1.0, 0.0],
+            },
+            Vertex
+            {
+                position: [0.5, -0.5, 0.0],
+                color: [0.0, 0.0, 1.0],
+            }
+        ];
+
+    let vertex_buffer =
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor
+        {
+            label: None,
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+    // end triangle
+
+    // begin shader
+
+    let shader =
+        device.create_shader_module(wgpu::ShaderModuleDescriptor
+        {
+            label: Some("Basic Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shadersrc/basic.wgsl").into()),
+        });
+
+    let pipeline_layout =
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor
+        {
+            label: Some("Pipeline Layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+
+    let render_pipeline =
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor
+        {
+            label: Some("Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState
+            {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState
+            {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState
+                {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: PipelineCompilationOptions::default(),
+
+            }),
+            primitive: wgpu::PrimitiveState
+            {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: Default::default(),
+        });
+
+
+    // end shader
+
     event_loop.run(move |event, event_loop|
         {
             event_loop.set_control_flow(Poll);
 
             //  let old_window_size = (config.width, config.height);
             let min_window_size = get_min_window_sizes();
+
             match event
             {
                 Event::WindowEvent { event, .. } => match event
@@ -136,11 +253,11 @@ fn main() {
                             };
 
                             let mut encoder = device.create_command_encoder(
-                                &wgpu::CommandEncoderDescriptor { label: None });
+                                &wgpu::CommandEncoderDescriptor { label: Some("Render Encoder") });
                             {
-                                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor
+                                let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor
                                 {
-                                    label: None,
+                                    label: Some("Render Pass"),
                                     timestamp_writes: None,
                                     occlusion_query_set: None,
                                     color_attachments: &[Some(wgpu::RenderPassColorAttachment
@@ -155,6 +272,11 @@ fn main() {
                                     })],
                                     depth_stencil_attachment: None,
                                 });
+
+                                render_pass.set_pipeline(&render_pipeline);
+                                render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                                render_pass.draw(0..3, 0..1);
+
                             }
 
                             queue.submit(Some(encoder.finish()));
@@ -181,9 +303,9 @@ async fn run_wgpu(window: &winit::window::Window, ) -> (Surface, Device, Queue, 
     };
 
     let instance = Instance::new(&instance_descriptor);
-    let surface = instance.create_surface(window).unwrap();
+    let surface = instance.create_surface(window).expect("Failed to create WGPU Surface!");
 
-    println!("WGPU Initialised!");
+    println!("WGPU Surface Initialised!");
 
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions
@@ -195,7 +317,7 @@ async fn run_wgpu(window: &winit::window::Window, ) -> (Surface, Device, Queue, 
         .await
         .expect("Failed to find a suitable GPU adapter!");
 
-    println!("Adapter found!");
+    println!("Adapter requested successfully!");
 
     let (device, queue) = adapter
         .request_device(
