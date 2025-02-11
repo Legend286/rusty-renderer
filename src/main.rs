@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use QueryType::Timestamp;
 #[cfg(target_arch = "wasm32")]
@@ -12,7 +12,9 @@ use winit::{
 use wgpu::{Adapter, Backends, Buffer, CommandEncoder, CompositeAlphaMode, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryHints, PipelineCompilationOptions, PipelineLayoutDescriptor, PresentMode, QuerySet, QueryType, Queue, RenderPassTimestampWrites, StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureViewDescriptor};
 use wgpu::util::DeviceExt;
 use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::event::DeviceEvent;
 use winit::event_loop::ControlFlow::Poll;
+use winit::window::Window;
 
 struct GPUTimer<'a> {
     encoder: &'a mut CommandEncoder,
@@ -67,7 +69,7 @@ fn get_backend() -> Backends {
 
 #[cfg(target_os = "windows")]
 fn get_backend() -> Backends {
-    Backends::VULKAN | Backends::DX12 // Use Vulkan or DX12 on Windows
+    Backends::VULKAN // Use Vulkan on Windows
 }
 
 #[cfg(target_os = "linux")]
@@ -86,7 +88,7 @@ fn get_backend() -> Backends {
 fn get_swap_chain_format() -> TextureFormat{ TextureFormat::Bgra8UnormSrgb }
 
 #[cfg(target_os = "windows")]
-fn get_swap_chain_format() -> TextureFormat{ TextureFormat::Rgba8UnormSrgb }
+fn get_swap_chain_format() -> TextureFormat{ TextureFormat::Bgra8UnormSrgb }
 
 #[cfg(target_os = "linux")]
 fn get_swap_chain_format() -> TextureFormat{ TextureFormat::Rgba8UnormSrgb }
@@ -134,6 +136,11 @@ fn main() {
     let window_ref = Arc::clone(&window);
 
     let (mut surface, mut device, mut queue, mut config, mut query) = pollster::block_on(run_wgpu(&window));
+    
+    render(surface, device, queue, config, query, window_ref, event_loop);
+}
+
+fn render(mut surface: Surface, mut device: Device, mut queue: Queue, mut config: SurfaceConfiguration, mut query: QuerySet, mut window_ref: Arc<Window>, mut event_loop: EventLoop<()>  ){
 
     // begin triangle
 
@@ -169,38 +176,32 @@ fn main() {
     // begin shader
 
     let shader =
-        device.create_shader_module(wgpu::ShaderModuleDescriptor
-        {
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Basic Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shadersrc/basic.wgsl").into()),
         });
 
     let pipeline_layout =
-        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor
-        {
+        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Pipeline Layout"),
             bind_group_layouts: &[],
             push_constant_ranges: &[],
         });
 
     let render_pipeline =
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor
-        {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState
-            {
+            vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 buffers: &[Vertex::desc()],
                 compilation_options: PipelineCompilationOptions::default(),
             },
-            fragment: Some(wgpu::FragmentState
-            {
+            fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState
-                {
+                targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
@@ -208,8 +209,7 @@ fn main() {
                 compilation_options: PipelineCompilationOptions::default(),
 
             }),
-            primitive: wgpu::PrimitiveState
-            {
+            primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
@@ -248,13 +248,12 @@ fn main() {
     }));
 
     let mut frame_time: Option<f32> = None; // Store the frame time
-
-
     let window = Arc::new(Mutex::new(window_ref));  // Wrap the window in an Arc<Mutex>
 
     event_loop.run(move |event, event_loop| {
         match event {
             Event::WindowEvent { event, .. } => match event {
+
                 WindowEvent::RedrawRequested => {
                     let frame = match surface.get_current_texture() {
                         Ok(frame) => frame,
@@ -303,45 +302,42 @@ fn main() {
                     // Submit the encoder commands to the queue
                     queue.submit(Some(encoder.finish()));
 
-                    // Map and process buffer data asynchronously
-                    read_buffer.slice(..).map_async(wgpu::MapMode::Read, {
-                        let read_buffer_clone = Arc::clone(&read_buffer);
-                        let window_clone = Arc::clone(&window); // Clone the window reference
-
-                        move |result| {
-                            if let Ok(()) = result {
-                                let slice = read_buffer_clone.slice(..); // Borrow the slice inside the closure
-                                let data = slice.get_mapped_range();
-                                let start_timestamp = bytemuck::from_bytes::<u64>(&data[0..8]);
-                                let end_timestamp = bytemuck::from_bytes::<u64>(&data[8..16]);
-                                let frame_time_calc = ((end_timestamp - start_timestamp) as f32) * 1e-6;
-
-                                // Store the frame time in the variable
-                                frame_time = Some(frame_time_calc);
-
-                                // Release the mapped memory
-                                drop(data);
-
-                                // Unmap the buffer explicitly after reading
-                                read_buffer_clone.unmap();
-
-                                // Update the window title with the frame time if available
-                                window_clone.lock().unwrap().set_title(&format!(
-                                        "{title} - FPS: {fps} - Frame time: {:.2} ms",
-                                        frame_time.unwrap_or(0.0),
-                                        fps = 1000.0 / frame_time.unwrap_or(1.0),
-                                        title = get_window_title()));
-
-
-                            } else {
-                                eprintln!("Failed to map buffer for reading.");
-                            }
+                    // Fix for map_async usage
+                    let buffer_slice = read_buffer.slice(..);
+                    buffer_slice.map_async(wgpu::MapMode::Read, |result| {
+                        if let Err(e) = result {
+                            eprintln!("Failed to map buffer: {:?}", e);
                         }
                     });
 
+
                     // Keep the GPU active after submission during rendering
                     device.poll(wgpu::Maintain::Wait);
+
                     frame.present();
+
+
+
+                    let data = buffer_slice.get_mapped_range();
+                    let start_ts = *bytemuck::from_bytes::<u64>(&data[0..8]);
+                    let end_ts = *bytemuck::from_bytes::<u64>(&data[8..16]);
+
+                    let timestamp_period = 1e-6; // Example period in nanoseconds converted to milliseconds
+                    let gpu_frame_time = ((end_ts - start_ts) as f32) * timestamp_period;
+
+
+                    let win = Arc::clone(&window);
+                    win.lock().unwrap().set_title(&format!(
+                        "{title} - FPS: {fps} - Frame time: {:.2} ms",
+                        gpu_frame_time,
+                        fps = 1000.0 / gpu_frame_time,
+                        title = get_window_title()));
+
+                    // Unmap the buffer when done
+                    drop(data);
+                    read_buffer.unmap();
+                    &window.lock().unwrap().request_redraw();
+
                 }
 
                 // Handle the window close event
@@ -351,6 +347,9 @@ fn main() {
 
                 // Handle window resizing
                 WindowEvent::Resized(physical_size) => {
+                    let min = get_min_window_sizes();
+                    config.width = physical_size.width.max(min.0);
+                    config.height = physical_size.height.max(min.1);
                     surface.configure(&device, &config);
                 }
 
@@ -359,16 +358,13 @@ fn main() {
             _ => {}
         }
     }).expect("Error during initialization.");
-
-
 }
 
 async fn run_wgpu(window: &winit::window::Window, ) -> (Surface, Device, Queue, SurfaceConfiguration, QuerySet)
 {
     let backend = get_backend();
     println!("Using backend: {}", get_backend_name(backend));
-    let instance_descriptor = InstanceDescriptor
-    {
+    let instance_descriptor = InstanceDescriptor {
         backends: backend,
         flags: InstanceFlags::default(),
         backend_options: Default::default(),
@@ -380,8 +376,7 @@ async fn run_wgpu(window: &winit::window::Window, ) -> (Surface, Device, Queue, 
     println!("WGPU Surface Initialised!");
 
     let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions
-        {
+        .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
@@ -391,27 +386,21 @@ async fn run_wgpu(window: &winit::window::Window, ) -> (Surface, Device, Queue, 
 
     println!("Adapter requested successfully!");
 
-    let required_features = if(adapter.features().contains(Features::TIMESTAMP_QUERY))
-    {
+    let required_features = if (adapter.features().contains(Features::TIMESTAMP_QUERY)) {
         println!("Timestamp Query Enabled!");
         Features::TIMESTAMP_QUERY
-    }
-    else
-    {
+    } else {
         println!("Timestamp Query Disabled!");
         Features::empty()
     };
 
-let (device, queue) = adapter
+    let (device, queue) = adapter
         .request_device(
-            &DeviceDescriptor
-            {
+            &DeviceDescriptor {
                 required_features: required_features,
                 required_limits: if cfg!(target_arch = "wasm32") {
                     Limits::downlevel_webgl2_defaults()
-                }
-                else
-                {
+                } else {
                     Limits::default()
                 },
                 label: Some("Adapter"),
@@ -437,8 +426,7 @@ let (device, queue) = adapter
     let min = get_min_window_sizes();
 
     let size = window.inner_size();
-    let config = SurfaceConfiguration
-    {
+    let config = SurfaceConfiguration {
         usage: TextureUsages::RENDER_ATTACHMENT,
         format: swap_chain_format,
         width: size.width.max(min.0),
