@@ -1,54 +1,64 @@
+mod transform;
+
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use QueryType::Timestamp;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+
 use winit::{
-    event::{Event, WindowEvent},
+    event::{Event, WindowEvent, DeviceEvent},
     event_loop::{ControlFlow, EventLoop},
-    window::WindowBuilder,
+    window::{WindowBuilder, Window},
 };
 
-use wgpu::{Adapter, Backends, Buffer, CommandEncoder, CompositeAlphaMode, Device, DeviceDescriptor, Features, Instance, InstanceDescriptor, InstanceFlags, Limits, MemoryHints, PipelineCompilationOptions, PipelineLayoutDescriptor, PresentMode, QuerySet, QueryType, Queue, RenderPassTimestampWrites, StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureViewDescriptor};
-use wgpu::util::DeviceExt;
+use wgpu::{
+    Adapter,
+    Backends,
+    Buffer,
+    CommandEncoder,
+    CompositeAlphaMode,
+    Device,
+    DeviceDescriptor,
+    Features,
+    Instance,
+    InstanceDescriptor,
+    InstanceFlags,
+    Limits,
+    MemoryHints,
+    PipelineCompilationOptions,
+    PipelineLayoutDescriptor,
+    PresentMode,
+    QuerySet,
+    QueryType,
+    Queue,
+    RenderPassTimestampWrites,
+    StoreOp,
+    Surface,
+    SurfaceConfiguration,
+    TextureFormat,
+    TextureUsages,
+    TextureViewDescriptor,
+    util::DeviceExt,
+};
+
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::DeviceEvent;
-use winit::event_loop::ControlFlow::Poll;
-use winit::window::Window;
-
-struct GPUTimer<'a> {
-    encoder: &'a mut CommandEncoder,
-    query_set: &'a QuerySet,
-    query_index: u32,
-}
-
-impl<'a> GPUTimer<'a> {
-    fn start(encoder: &'a mut CommandEncoder, query_set: &'a QuerySet, query_index: u32) -> Self {
-        encoder.write_timestamp(query_set, query_index);
-        Self { encoder, query_set, query_index }
-    }
-}
-
-impl<'a> Drop for GPUTimer<'a> {
-    fn drop(&mut self) {
-        self.encoder.write_timestamp(self.query_set, self.query_index + 1);
-    }
-}
+use transform::{Transform, TransformSystem};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex
 {
-    position: [f32; 3],
-    color: [f32; 3],
+    position: [f32; 4],
+    color: [f32; 4],
 }
 
 impl Vertex
 {
     const ATTRIBS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array!
     [
-        0 => Float32x3,
-        1 => Float32x3,
+        0 => Float32x4,
+        1 => Float32x4,
     ];
 
     fn desc() -> wgpu::VertexBufferLayout<'static>
@@ -148,18 +158,18 @@ fn render(mut surface: Surface, mut device: Device, mut queue: Queue, mut config
         [
             Vertex
             {
-                position: [0.0, 0.5, 0.0],
-                color: [1.0, 0.0, 0.0],
+                position: [0.0, 0.5, 0.0, 1.0],
+                color: [1.0, 0.0, 0.0, 1.0],
             },
             Vertex
             {
-                position: [-0.5, -0.5, 0.0],
-                color: [0.0, 1.0, 0.0],
+                position: [-0.5, -0.5, 0.0, 1.0],
+                color: [0.0, 1.0, 0.0, 1.0],
             },
             Vertex
             {
-                position: [0.5, -0.5, 0.0],
-                color: [0.0, 0.0, 1.0],
+                position: [0.5, -0.5, 0.0, 1.0],
+                color: [0.0, 0.0, 1.0, 1.0],
             }
         ];
 
@@ -247,7 +257,6 @@ fn render(mut surface: Surface, mut device: Device, mut queue: Queue, mut config
         mapped_at_creation: false,
     }));
 
-    let mut frame_time: Option<f32> = None; // Store the frame time
     let window = Arc::new(Mutex::new(window_ref));  // Wrap the window in an Arc<Mutex>
 
     event_loop.run(move |event, event_loop| {
